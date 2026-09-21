@@ -1,0 +1,134 @@
+/*
+  Morse Receiver
+
+  WIRING (voltage divider)
+  - 5V -> photoresistor (LDR) -> A0 -> 10k resistor -> GND
+  Brighter light = lower LDR resistance = HIGHER reading on A0.
+  Aim the LDR at the transmitter LED, 1-2 cm away. Shield it from room
+  light with a straw, tube, or tape so the LED stands out.
+
+  START THE TRANSMITTER FIRST. For the first 6 seconds the receiver
+  watches the light and sets its threshold halfway between the darkest
+  and brightest readings it sees. Open the Serial Monitor at 9600 baud.
+*/
+
+const int LDR_PIN = A0;
+const int UNIT = 200;                  // ms; must match the transmitter
+int threshold = 500;                   // set automatically by calibrate()
+
+const char letters[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const char* codes[] = {
+  ".-", "-...", "-.-.", "-..", ".", "..-.", "--.", "....", "..", ".---",
+  "-.-", ".-..", "--", "-.", "---", ".--.", "--.-", ".-.", "...", "-",
+  "..-", "...-", ".--", "-..-", "-.--", "--.."
+};
+
+char symbols[8];                       // dots and dashes of the letter being received
+int symbolCount = 0;
+
+bool lightOn = false;
+unsigned long lastChange = 0;          // when the light last switched ON or OFF
+
+bool letterDone = true;                // have we decoded the letter yet?
+bool spaceChecked = true;              // have we checked for a word gap yet?
+bool messageDone = true;               // have we ended the message line yet?
+bool pendingSpace = false;             // print a space before the next letter
+
+void calibrate() {
+  while (true) {
+    Serial.println("Calibrating... transmitter should be flashing");
+    int lo = 1023;
+    int hi = 0;
+    unsigned long start = millis();
+    while (millis() - start < 6000) {
+      int v = analogRead(LDR_PIN);
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    if (hi - lo > 100) {
+      threshold = (lo + hi) / 2;
+      Serial.print("Dark: ");
+      Serial.print(lo);
+      Serial.print("  Bright: ");
+      Serial.print(hi);
+      Serial.print("  Threshold: ");
+      Serial.println(threshold);
+      return;
+    }
+    Serial.println("No flashes seen. Aim the LED at the sensor and shield room light.");
+  }
+}
+
+// Called when a flash ends: was it a dot or a dash?
+void addSymbol(unsigned long pulse) {
+  if (pulse < UNIT / 4) return;        // ignore tiny noise blips
+  if (pulse > 5 * UNIT) {              // far longer than any dash: not Morse (box lid opened, flashlight...)
+    symbolCount = 0;                   // throw away the half-built letter
+    return;
+  }
+  if (symbolCount < 7) {
+    symbols[symbolCount] = (pulse < 2 * UNIT) ? '.' : '-';
+    symbolCount++;
+  }
+}
+
+// Look up the collected dots and dashes in the Morse table
+void decodeLetter() {
+  if (symbolCount == 0) return;        // nothing collected, nothing to decode
+  symbols[symbolCount] = '\0';
+  char out = '?';
+  for (int i = 0; i < 26; i++) {
+    if (strcmp(symbols, codes[i]) == 0) {
+      out = letters[i];
+      break;
+    }
+  }
+  if (pendingSpace) {
+    Serial.print(' ');
+    pendingSpace = false;
+  }
+  Serial.print(out);
+  symbolCount = 0;
+}
+
+void setup() {
+  Serial.begin(9600);
+  calibrate();
+  Serial.println("Ready. Listening...");
+  lastChange = millis();
+}
+
+void loop() {
+  bool nowOn = analogRead(LDR_PIN) > threshold;
+  unsigned long now = millis();
+
+  if (nowOn != lightOn) {
+    if (lightOn) {                     // light just turned OFF, so a flash just ended
+      addSymbol(now - lastChange);
+      if (symbolCount > 0) {
+        letterDone = false;
+        spaceChecked = false;
+        messageDone = false;
+      }
+    }
+    lightOn = nowOn;
+    lastChange = now;
+  }
+
+  if (!lightOn) {
+    unsigned long dark = now - lastChange;
+    if (!letterDone && dark > 2 * UNIT) {       // between 1 (inside a letter) and 3 (between letters)
+      decodeLetter();
+      letterDone = true;
+    }
+    if (!spaceChecked && dark > 5 * UNIT) {     // between 3 (letters) and 7 (words)
+      pendingSpace = true;
+      spaceChecked = true;
+    }
+    if (!messageDone && dark > 12 * UNIT) {     // long silence: message is over
+      Serial.println();
+      pendingSpace = false;
+      messageDone = true;
+    }
+  }
+}
