@@ -1,0 +1,62 @@
+/*
+  Morse Transmitter
+
+  WIRING
+  - Arduino pin 8 -> 220 ohm resistor -> LED long leg (anode)
+  - LED short leg (cathode) -> GND
+  Aim the LED straight at the receiver's photoresistor, 1-2 cm away.
+  A white or green LED is picked up best by CdS photoresistors.
+
+  TIMING (1 unit = UNIT ms)
+  - dot = 1 unit ON, dash = 3 units ON
+  - gap between dots/dashes = 1 unit OFF
+  - gap between letters     = 3 units OFF
+  - gap between words       = 7 units OFF
+*/
+
+const int LED_PIN = 8;
+const int UNIT = 200;                  // ms; must match the receiver
+const char* MESSAGE = "HELLO WORLD";   // letters and spaces only
+
+// Morse code for A to Z
+const char* codes[] = {
+  ".-", "-...", "-.-.", "-..", ".", "..-.", "--.", "....", "..", ".---",
+  "-.-", ".-..", "--", "-.", "---", ".--.", "--.-", ".-.", "...", "-",
+  "..-", "...-", ".--", "-..-", "-.--", "--.."
+};
+
+void setup() {
+  pinMode(LED_PIN, OUTPUT);
+}
+
+// Flash the LED for a number of units, then leave a 1-unit gap
+void flash(int units) {
+  digitalWrite(LED_PIN, HIGH);
+  delay(units * UNIT);
+  digitalWrite(LED_PIN, LOW);
+  delay(UNIT);
+}
+
+void sendLetter(char c) {
+  const char* code = codes[c - 'A'];
+  for (int i = 0; code[i] != '\0'; i++) {
+    if (code[i] == '.') {
+      flash(1);
+    } else {
+      flash(3);
+    }
+  }
+  delay(2 * UNIT);                     // 1 (already waited) + 2 = 3 units between letters
+}
+
+void loop() {
+  for (int i = 0; MESSAGE[i] != '\0'; i++) {
+    char c = toupper(MESSAGE[i]);
+    if (c == ' ') {
+      delay(4 * UNIT);                 // 3 (after the letter) + 4 = 7 units between words
+    } else if (c >= 'A' && c <= 'Z') {
+      sendLetter(c);
+    }
+  }
+  delay(3000);                         // pause, then send the message again
+}
