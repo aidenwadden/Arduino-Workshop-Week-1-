@@ -48,3 +48,8 @@ Symptom	Likely cause
 "No flashes seen" during calibration	LED not aimed at the sensor, or too much room light
 Random ? characters	Threshold too close to noise; move the LED closer
 Letters run together or split apart	UNIT doesn't match between the two sketches
+
+CHALLENGE PROBLEM:
+1.) Add an active buzzer to the circuit such that it is in sync with the LED
+2.) Combine the receiver and LED circuit such that is is on one Arduino
+3.) Add an LCD I2C to display the message, all on one Arduino. 
