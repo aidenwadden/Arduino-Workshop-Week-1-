@@ -1,0 +1,266 @@
+/*
+  Morse Transmitter + Receiver — one Arduino, one pin layout
+
+  This one board sends itself a message with an LED and reads it back
+  with a photoresistor, then decodes it and shows it on an LCD. Point
+  the LED straight at the photoresistor, 1-2 cm away, and shield both
+  from room light with a short tube.
+
+  PIN LAYOUT
+    8             -> LED (through 220 ohm resistor) AND buzzer +, wired
+                     in parallel. Both are just driven from pin 8 — no
+                     separate buzzer code needed.
+    A0            -> photoresistor voltage divider (signal)
+    A4 (SDA)      -> LCD
+    A5 (SCL)      -> LCD
+    5V            -> photoresistor divider high side + LCD VCC
+    GND           -> LED cathode, buzzer -, divider low side, LCD GND
+                     (all share one ground rail)
+
+  WIRING (LED)
+  - Pin 8 -> 220 ohm resistor -> LED long leg (anode)
+  - LED short leg (cathode) -> GND
+  - Buzzer + also to pin 8, buzzer - to GND
+
+  WIRING (photoresistor voltage divider)
+  - 5V -> photoresistor -> A0 -> 10k resistor -> GND
+  Brighter light = lower LDR resistance = HIGHER reading on A0.
+
+  WIRING (LCD, I2C)
+  - SDA -> A4, SCL -> A5, VCC -> 5V, GND -> GND
+  Needs the "LiquidCrystal I2C" library (Frank de Brabander) installed.
+  Default address is 0x27; run an I2C scanner if the screen stays blank.
+
+  Edit MESSAGE below (letters and spaces only) to change what it sends.
+*/
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+int lcdCol = 0;
+int lcdRow = 0;
+bool lcdNeedsClear = false;   // true once a finished message should be wiped before the next one
+
+const int LED_PIN = 8;
+const int LDR_PIN = A0;
+const int UNIT = 200;                  // ms; one clock now drives both sending and reading
+int threshold = 500;                   // set automatically by calibrate()
+
+const char* MESSAGE = "HELLO WORLD";   // letters and spaces only
+
+const char letters[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const char* codes[] = {
+  ".-", "-...", "-.-.", "-..", ".", "..-.", "--.", "....", "..", ".---",
+  "-.-", ".-..", "--", "-.", "---", ".--.", "--.-", ".-.", "...", "-",
+  "..-", "...-", ".--", "-..-", "-.--", "--.."
+};
+
+// ---------- Transmitter: a non-blocking segment player ----------
+// Instead of delay(), the whole message is pre-broken into a list of
+// (LED on or off, duration) segments, built once in buildSegments().
+// txStep() checks the clock and steps to the next segment when the
+// current one's time is up, so it never blocks the receiver code below.
+
+struct Segment { bool on; unsigned int ms; };
+const int MAX_SEGMENTS = 300;
+Segment segments[MAX_SEGMENTS];
+int segCount = 0;
+int segIndex = 0;
+unsigned long segStart = 0;
+
+void addSeg(bool on, unsigned int units) {
+  if (segCount < MAX_SEGMENTS) {
+    segments[segCount].on = on;
+    segments[segCount].ms = units * UNIT;
+    segCount++;
+  }
+}
+
+void addSegMs(bool on, unsigned int ms) {
+  if (segCount < MAX_SEGMENTS) {
+    segments[segCount].on = on;
+    segments[segCount].ms = ms;
+    segCount++;
+  }
+}
+
+void buildSegments() {
+  segCount = 0;
+  for (int i = 0; MESSAGE[i] != '\0'; i++) {
+    char c = toupper(MESSAGE[i]);
+    if (c == ' ') {
+      addSeg(false, 4);                // tops up the letter gap to a 7-unit word gap
+    } else if (c >= 'A' && c <= 'Z') {
+      const char* code = codes[c - 'A'];
+      for (int j = 0; code[j] != '\0'; j++) {
+        addSeg(true, code[j] == '.' ? 1 : 3);
+        addSeg(false, 1);              // 1-unit gap after every symbol
+      }
+      addSeg(false, 2);                // tops up to a 3-unit letter gap
+    }
+  }
+  addSegMs(false, 3000);               // pause before the message repeats
+}
+
+void txStep() {
+  unsigned long now = millis();
+  if (now - segStart >= segments[segIndex].ms) {
+    segIndex++;
+    if (segIndex >= segCount) segIndex = 0;   // loop back to the start of the message
+    digitalWrite(LED_PIN, segments[segIndex].on ? HIGH : LOW);
+    segStart = now;
+  }
+}
+
+// ---------- Receiver ----------
+
+char symbols[8];                       // dots and dashes of the letter being received
+int symbolCount = 0;
+
+bool lightOn = false;
+unsigned long lastChange = 0;          // when the light last switched ON or OFF
+
+bool letterDone = true;                // have we decoded the letter yet?
+bool spaceChecked = true;              // have we checked for a word gap yet?
+bool messageDone = true;               // have we ended the message line yet?
+bool pendingSpace = false;             // print a space before the next letter
+
+// Print one character to the LCD, wrapping and clearing as needed
+void lcdWrite(char c) {
+  if (lcdCol >= 16) {
+    lcdCol = 0;
+    lcdRow++;
+  }
+  if (lcdRow >= 2) {
+    lcd.clear();
+    lcdRow = 0;
+    lcdCol = 0;
+  }
+  lcd.setCursor(lcdCol, lcdRow);
+  lcd.print(c);
+  lcdCol++;
+}
+
+void calibrate() {
+  while (true) {
+    Serial.println("Calibrating... (sending itself the message to see by)");
+    int lo = 1023;
+    int hi = 0;
+    unsigned long start = millis();
+    while (millis() - start < 6000) {
+      txStep();                        // keep the LED/buzzer running during calibration
+      int v = analogRead(LDR_PIN);
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    if (hi - lo > 100) {
+      threshold = (lo + hi) / 2;
+      Serial.print("Dark: ");
+      Serial.print(lo);
+      Serial.print("  Bright: ");
+      Serial.print(hi);
+      Serial.print("  Threshold: ");
+      Serial.println(threshold);
+      return;
+    }
+    Serial.println("No contrast seen. Check the LED-to-photoresistor alignment.");
+  }
+}
+
+// Called when a flash ends: was it a dot or a dash?
+void addSymbol(unsigned long pulse) {
+  if (pulse < UNIT / 4) return;        // ignore tiny noise blips
+  if (pulse > 5 * UNIT) {              // far longer than any dash: not Morse
+    symbolCount = 0;
+    return;
+  }
+  if (symbolCount < 7) {
+    symbols[symbolCount] = (pulse < 2 * UNIT) ? '.' : '-';
+    symbolCount++;
+  }
+}
+
+// Look up the collected dots and dashes in the Morse table
+void decodeLetter() {
+  if (symbolCount == 0) return;        // nothing collected, nothing to decode
+  symbols[symbolCount] = '\0';
+  char out = '?';
+  for (int i = 0; i < 26; i++) {
+    if (strcmp(symbols, codes[i]) == 0) {
+      out = letters[i];
+      break;
+    }
+  }
+  if (lcdNeedsClear) {
+    lcd.clear();
+    lcdRow = 0;
+    lcdCol = 0;
+    lcdNeedsClear = false;
+  }
+  if (pendingSpace) {
+    Serial.print(' ');
+    lcdWrite(' ');
+    pendingSpace = false;
+  }
+  Serial.print(out);
+  lcdWrite(out);
+  symbolCount = 0;
+}
+
+void setup() {
+  pinMode(LED_PIN, OUTPUT);
+  buildSegments();
+  digitalWrite(LED_PIN, segments[0].on ? HIGH : LOW);
+  segIndex = 0;
+  segStart = millis();
+
+  Wire.begin();
+  lcd.init();
+  lcd.backlight();
+  lcd.print("Calibrating...");
+
+  Serial.begin(9600);
+  calibrate();
+  Serial.println("Ready. Listening...");
+  lcd.clear();
+  lastChange = millis();
+}
+
+void loop() {
+  txStep();                            // keep sending the message
+
+  bool nowOn = analogRead(LDR_PIN) > threshold;
+  unsigned long now = millis();
+
+  if (nowOn != lightOn) {
+    if (lightOn) {                     // light just turned OFF, so a flash just ended
+      addSymbol(now - lastChange);
+      if (symbolCount > 0) {
+        letterDone = false;
+        spaceChecked = false;
+        messageDone = false;
+      }
+    }
+    lightOn = nowOn;
+    lastChange = now;
+  }
+
+  if (!lightOn) {
+    unsigned long dark = now - lastChange;
+    if (!letterDone && dark > 2 * UNIT) {       // between 1 (inside a letter) and 3 (between letters)
+      decodeLetter();
+      letterDone = true;
+    }
+    if (!spaceChecked && dark > 5 * UNIT) {     // between 3 (letters) and 7 (words)
+      pendingSpace = true;
+      spaceChecked = true;
+    }
+    if (!messageDone && dark > 12 * UNIT) {     // long silence: message is over
+      Serial.println();
+      pendingSpace = false;
+      messageDone = true;
+      lcdNeedsClear = true;            // wipe the LCD once the next message starts, not now
+    }
+  }
+}
